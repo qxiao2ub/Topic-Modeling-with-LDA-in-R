@@ -1,0 +1,174 @@
+---
+title: "Topic Modeling with LDA in R"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '2'
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+```
+
+## Packages
+
+```{r packages}
+req_pkgs <- c(
+  "topicmodels",
+  "quanteda",
+  "readr",
+  "stringr",
+  "dplyr",
+  "tibble",
+  "ggplot2"
+)
+
+to_install <- setdiff(req_pkgs, rownames(installed.packages()))
+if (length(to_install) > 0) {
+  install.packages(to_install, repos = "https://cloud.r-project.org")
+}
+
+invisible(lapply(req_pkgs, library, character.only = TRUE))
+```
+# (a) Data: Article & Paragraph Documents
+
+Set the article path. If needed, change `ARTICLE_PATH` to your local copy of the text file.
+
+```{r data-load}
+# Try the path used in the Python environment, otherwise default to local working dir
+ARTICLE_PATH <- "Problem1News.txt"
+if (!file.exists(ARTICLE_PATH)) {
+  ARTICLE_PATH <- "Problem1News.txt"   # adjust if your file is elsewhere
+}
+
+stopifnot(file.exists(ARTICLE_PATH))
+
+txt <- readr::read_file(ARTICLE_PATH)
+
+# Split into paragraphs by blank lines
+paras <- strsplit(txt, "\\n\\s*\\n+")[[1]]
+paras <- trimws(paras)
+paras <- paras[nzchar(paras)]
+
+length(paras)
+head(paras, 2)
+```
+
+# (b) Preprocessing
+
+Use **quanteda** for tokenization, stopword removal, and stemming, and then build a **document–term matrix** (DTM).
+
+```{r preprocessing}
+set.seed(123)
+
+corp <- quanteda::corpus(paras)
+
+# Tokenize and normalize
+toks <- quanteda::tokens(
+  corp,
+  remove_punct   = TRUE,
+  remove_numbers = TRUE
+)
+
+toks <- quanteda::tokens_tolower(toks)
+toks <- quanteda::tokens_remove(toks, pattern = stopwords("en"))
+toks <- quanteda::tokens_wordstem(toks, language = "en")
+
+# Build dfm and trim extreme terms rare or common similar to the Python version
+dfm_mat <- quanteda::dfm(toks)
+dfm_mat <- quanteda::dfm_trim(dfm_mat, min_docfreq = 2, docfreq_type = "count")
+dfm_mat <- quanteda::dfm_trim(dfm_mat, max_docfreq = 0.9, docfreq_type = "prop")
+
+# Convert to topicmodels DTM
+dtm <- quanteda::convert(dfm_mat, to = "topicmodels")
+
+dtm
+```
+
+Show a few preprocessed samples:
+
+```{r show-preprocessed}
+# Show first 3 processed documents (as token lists)
+as.list(toks)[1:min(3, length(toks))]
+```
+
+# (c) LDA Model (topicmodels)
+
+Set the number of topics `K`. By default, we match Problem 1 (`K = 3`). Adjust if your Problem 1 used a different number.
+
+```{r lda-train}
+K <- 3  # <-- change if your Problem 1 used a different K
+set.seed(123)
+
+# You can use either "Gibbs" or "VEM". Gibbs is typically robust for small corpora.
+control_gibbs <- list(seed = 42, burnin = 1000, thin = 100, iter = 2000)
+fit <- topicmodels::LDA(dtm, k = K, method = "Gibbs", control = control_gibbs)
+
+fit
+```
+
+# (d) Results Presentation
+
+## Top 10 words per topic
+
+```{r top-terms}
+top_terms <- terms(fit, 10)
+top_terms
+```
+
+## Top 2 documents for each topic
+
+Compute posterior topic probabilities for each document and select the two most associated paragraphs per topic.
+
+```{r top-docs}
+post <- posterior(fit)
+doc_topic <- post$topics   # rows: documents, cols: topics
+
+# Helper to grab top-2 docs per topic
+top_docs_for_topic <- function(doc_topic, t, m = 2) {
+  ord <- order(doc_topic[, t], decreasing = TRUE)
+  idxs <- ord[seq_len(min(m, length(ord)))]
+  scores <- doc_topic[idxs, t]
+  list(idxs = idxs, scores = scores)
+}
+
+# Show top 2 docs (with short excerpts) for each topic
+for (t in seq_len(K)) {
+  cat("\\n", paste0("=== Topic ", t - 1, " ==="), "\\n", sep = "")
+  td <- top_docs_for_topic(doc_topic, t, m = 2)
+  for (i in seq_along(td$idxs)) {
+    di <- td$idxs[i]
+    sc <- td$scores[i]
+    cat(sprintf("[%d] Paragraph #%d | Score = %.4f\\n", i, di - 1, sc))
+    para_text <- gsub("\\n", " ", paras[di])
+    # show a trimmed excerpt
+    excerpt <- substr(para_text, 1, 300)
+    if (nchar(para_text) > 300) excerpt <- paste0(excerpt, "...")
+    cat(excerpt, "\\n\\n")
+  }
+}
+```
+
+## Short labels for each topic (2–3 words)
+
+Propose simple labels by taking the first 2–3 most salient words for each topic.
+
+```{r labels}
+make_label <- function(words, k = 3) {
+  paste(utils::head(words, k), collapse = " ")
+}
+
+topic_labels <- sapply(seq_len(K), function(t) make_label(top_terms[, t], k = 3))
+
+data.frame(
+  Topic = 0:(K - 1),
+  Label_2_3_words = topic_labels,
+  Top10_Words = apply(top_terms, 2, function(x) paste(x, collapse = ", ")),
+  row.names = NULL
+)
+```
+
